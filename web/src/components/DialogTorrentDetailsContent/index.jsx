@@ -251,6 +251,7 @@ export default function DialogTorrentDetailsContent({ closeDialog, torrent }) {
 
               <Table
                 hash={hash}
+                fileList={torrentFileList}
                 playableFileList={playableFileList}
                 viewedFileList={viewedFileList}
                 selectedSeason={selectedSeason}

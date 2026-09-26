@@ -1,5 +1,6 @@
 import { useQuery } from 'react-query'
 
+import { getExtension } from './mediaFormats'
 import { getTorrServerHost, gstSettingsHost } from './Hosts'
 
 export const GST_RUNTIME_QUERY_KEY = 'gstreamer-runtime-settings'
@@ -23,11 +24,7 @@ export const useGStreamerRuntime = () => {
   return data || unavailableRuntime
 }
 
-const fileExtension = path => {
-  const fileName = path.split('?')[0]
-  const dot = fileName.lastIndexOf('.')
-  return dot === -1 ? '' : fileName.slice(dot + 1).toLowerCase()
-}
+const fileExtension = path => getExtension(path)
 
 export const shouldUseGStreamerPlayer = (path, runtime) => {
   if (!runtime?.built_in) return false
@@ -35,13 +32,25 @@ export const shouldUseGStreamerPlayer = (path, runtime) => {
   switch (fileExtension(path)) {
     case 'mkv':
     case 'mk3d':
-    case 'webm':
+    case 'mpv':
       return true
     case 'avi':
       return Boolean(runtime.config?.TranscodeAVI)
     default:
+      // Everything else, including .webm, is offered to the browser first: the player
+      // falls back to this ladder on its own when native playback fails.
       return false
   }
+}
+
+// Whether the transcoding ladder is worth trying after the browser failed on a direct
+// stream. The GStreamer demuxers cover far more containers than any browser, so this is
+// allowed broadly; AVI is the exception because it is only demuxed when explicitly
+// enabled in the server settings.
+export const canFallbackToGStreamer = (path, runtime) => {
+  if (!runtime?.built_in) return false
+  if (fileExtension(path) === 'avi') return Boolean(runtime.config?.TranscodeAVI)
+  return true
 }
 
 export const gstreamerMasterUrl = (hash, fileID, audio = 0) =>

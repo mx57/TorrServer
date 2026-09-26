@@ -6,11 +6,14 @@ import { Button } from '@material-ui/core'
 import CopyToClipboard from 'react-copy-to-clipboard'
 import { useTranslation } from 'react-i18next'
 import {
+  canFallbackToGStreamer,
   gstreamerHeartbeatUrl,
   gstreamerMasterUrl,
   shouldUseGStreamerPlayer,
   useGStreamerRuntime,
 } from 'utils/GStreamer'
+import { findSidecarSubtitles } from 'utils/mediaFormats'
+import { useBooleanPlayerPreference } from 'utils/PlayerPreferences'
 
 import VideoPlayer from '../../VideoPlayer'
 import { TableStyle, ShortTableWrapper, ShortTable } from './style'
@@ -29,9 +32,10 @@ ptt.addHandler('season', /сезон[- |. ](\d{1,3})|(\d{1,3})[- |. ]сезон/
 })
 
 const Table = memo(
-  ({ playableFileList, viewedFileList, selectedSeason, seasonAmount, hash }) => {
+  ({ playableFileList, fileList, viewedFileList, selectedSeason, seasonAmount, hash }) => {
     const { t } = useTranslation()
     const [unsupportedPlayers, setUnsupportedPlayers] = useState({})
+    const [transcodeFallback, setTranscodeFallback] = useState({})
     const gstRuntime = useGStreamerRuntime()
     const preloadBuffer = fileId => fetch(`${streamHost()}?link=${hash}&index=${fileId}&preload`)
     const getFileLink = (path, id) =>
@@ -40,6 +44,8 @@ const Table = memo(
       const hls = shouldUseGStreamerPlayer(path, gstRuntime)
       return {
         key: `${id}:${hls ? 'gst' : 'stream'}`,
+        path,
+        id,
         src: hls ? gstreamerMasterUrl(hash, id) : getFileLink(path, id),
         hls,
         heartbeatSrc: hls ? gstreamerHeartbeatUrl(hash) : '',
@@ -48,6 +54,34 @@ const Table = memo(
     const markPlayerUnsupported = key => {
       setUnsupportedPlayers(current => ({ ...current, [key]: true }))
     }
+    // A direct stream the browser refuses gets one retry through the server transcoder.
+    const withTranscodeFallback = player => {
+      if (!player || player.hls) return player
+      if (!transcodeFallback[player.id]) return player
+      if (!canFallbackToGStreamer(player.path, gstRuntime)) return player
+      return {
+        ...player,
+        key: `${player.id}:gst`,
+        hls: true,
+        src: gstreamerMasterUrl(hash, player.id),
+        heartbeatSrc: gstreamerHeartbeatUrl(hash),
+      }
+    }
+    const handlePlayerFailure = player => {
+      if (!player) return
+      if (!player.hls && canFallbackToGStreamer(player.path, gstRuntime) && !transcodeFallback[player.id]) {
+        setTranscodeFallback(current => ({ ...current, [player.id]: true }))
+        return
+      }
+      markPlayerUnsupported(withTranscodeFallback(player).key)
+    }
+    // Sidecar subtitles live outside playableFileList, which is filtered to media only.
+    const getCaptions = path =>
+      findSidecarSubtitles(path, fileList || []).map(track => ({
+        src: getFileLink(track.path, track.id),
+        lang: track.lang,
+        label: track.label,
+      }))
     const fileHasEpisodeText = !!playableFileList?.find(({ path }) => ptt.parse(path).episode)
     const fileHasSeasonText = !!playableFileList?.find(({ path }) => ptt.parse(path).season)
     const fileHasResolutionText = !!playableFileList?.find(({ path }) => ptt.parse(path).resolution)
@@ -55,10 +89,10 @@ const Table = memo(
     // if files in list is more then 1 and no season text detected by ptt.parse, show full name
     const shouldDisplayFullFileName = playableFileList?.length > 1 && !fileHasEpisodeText
 
-    const isVlcUsed = JSON.parse(localStorage.getItem('isVlcUsed')) ?? false
-    const isInfuseUsed = JSON.parse(localStorage.getItem('isInfuseUsed')) ?? false
-    const isSenPlayerUsed = JSON.parse(localStorage.getItem('isSenPlayerUsed')) ?? false
-    const isIinaUsed = JSON.parse(localStorage.getItem('isIinaUsed')) ?? false
+    const isVlcUsed = useBooleanPlayerPreference('isVlcUsed')
+    const isInfuseUsed = useBooleanPlayerPreference('isInfuseUsed')
+    const isSenPlayerUsed = useBooleanPlayerPreference('isSenPlayerUsed')
+    const isIinaUsed = useBooleanPlayerPreference('isIinaUsed')
     const isStandalone = detectStandaloneApp()
     const isMac = isMacOS()
     const isApple = isAppleDevice()
@@ -88,7 +122,7 @@ const Table = memo(
               const { title, resolution, episode, season } = ptt.parse(path)
               const isViewed = viewedFileList?.includes(id)
               const link = getFileLink(path, id)
-              const player = getPlayer(path, id)
+              const player = withTranscodeFallback(getPlayer(path, id))
               const playerSupported = !unsupportedPlayers[player.key]
               const fullLink = new URL(link, window.location.href)
               const infuseLink = `infuse://x-callback-url/play?url=${encodeURIComponent(fullLink)}`
@@ -142,9 +176,13 @@ const Table = memo(
                             title={title}
                             videoSrc={player.src}
                             downloadSrc={link}
+                            captions={player.hls ? [] : getCaptions(path)}
+                            hash={hash}
+                            fileId={id}
                             hls={player.hls}
                             heartbeatSrc={player.heartbeatSrc}
-                            onNotSupported={() => markPlayerUnsupported(player.key)}
+                            onNotSupported={() => handlePlayerFailure(getPlayer(path, id))}
+                            onPlaybackError={() => handlePlayerFailure(getPlayer(path, id))}
                           />
                         ) : (
                           shouldShowOpenLink && (
@@ -181,7 +219,7 @@ const Table = memo(
             const { title, resolution, episode, season } = ptt.parse(path)
             const isViewed = viewedFileList?.includes(id)
             const link = getFileLink(path, id)
-            const player = getPlayer(path, id)
+            const player = withTranscodeFallback(getPlayer(path, id))
             const playerSupported = !unsupportedPlayers[player.key]
             const fullLink = new URL(link, window.location.href)
             const infuseLink = `infuse://x-callback-url/play?url=${encodeURIComponent(fullLink)}`
@@ -266,9 +304,12 @@ const Table = memo(
                         title={title}
                         videoSrc={player.src}
                         downloadSrc={link}
+                        hash={hash}
+                        fileId={id}
                         hls
                         heartbeatSrc={player.heartbeatSrc}
-                        onNotSupported={() => markPlayerUnsupported(player.key)}
+                        onNotSupported={() => handlePlayerFailure(getPlayer(path, id))}
+                        onPlaybackError={() => handlePlayerFailure(getPlayer(path, id))}
                       />
                     )}
 
