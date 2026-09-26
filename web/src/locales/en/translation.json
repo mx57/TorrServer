@@ -382,5 +382,28 @@
   "Uncategorized": "Uncategorized",
   "UploadFile": "Upload File",
   "UploadSpeed": "Upload speed",
+  "VideoPlayer": {
+    "Quality": "Quality",
+    "Auto": "Auto",
+    "Retry": "Retry",
+    "PlaybackFailed": "Playback failed",
+    "Seek": "Seek",
+    "Subtitles": "Subtitles",
+    "ErrorAborted": "Playback was interrupted",
+    "ErrorNetwork": "Cannot reach the video stream",
+    "ErrorDecode": "Cannot decode this video",
+    "ErrorSource": "This video cannot be played here",
+    "ResumeAt": "Continue from {{time}}?",
+    "Resume": "Continue",
+    "StartOver": "Start over",
+    "PopOut": "Open in a separate window",
+    "BackToTab": "Back to the player",
+    "PlayingDetached": "Playing in a separate window",
+    "UpNext": "Up next: {{title}}",
+    "PlayNext": "Play next",
+    "Replay": "Watch again",
+    "NextEpisode": "Next episode: {{title}}",
+    "PreviousEpisode": "Previous episode: {{title}}"
+  },
   "Viewed": "Viewed"
 }

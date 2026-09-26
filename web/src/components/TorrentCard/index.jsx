@@ -1,4 +1,4 @@
-import { forwardRef, memo, useEffect, useRef, useState } from 'react'
+import { forwardRef, memo, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Audiotrack as AudiotrackIcon,
   UnfoldMore as UnfoldMoreIcon,
@@ -36,12 +36,14 @@ import { TORRENT_CATEGORIES } from 'components/categories'
 import VideoPlayer from 'components/VideoPlayer'
 import { isFilePlayable } from 'components/DialogTorrentDetailsContent/helpers'
 import {
+  canFallbackToGStreamer,
   gstreamerHeartbeatUrl,
   gstreamerMasterUrl,
   gstreamerProbeUrl,
   shouldUseGStreamerPlayer,
   useGStreamerRuntime,
 } from 'utils/GStreamer'
+import { findSidecarSubtitles } from 'utils/mediaFormats'
 
 import {
   StatusIndicators,
@@ -149,6 +151,7 @@ const Torrent = ({ torrent }) => {
   const [isDetailedInfoOpened, setIsDetailedInfoOpened] = useState(false)
   const [isDeleteTorrentOpened, setIsDeleteTorrentOpened] = useState(false)
   const [unsupportedPlayers, setUnsupportedPlayers] = useState({})
+  const [transcodeFallback, setTranscodeFallback] = useState({})
   const [episodeMenuAnchor, setEpisodeMenuAnchor] = useState(null)
   const [selectedPlayer, setSelectedPlayer] = useState(null)
   const [resolvedFileList, setResolvedFileList] = useState([])
@@ -232,13 +235,16 @@ const Torrent = ({ torrent }) => {
     ? resolvedFileList
     : filesFromMetadata(data)
   const playableVideoList = fileList.filter(({ path }) => isFilePlayable(path))
-  const getVideoCaption = path => {
-    // Get base name without extension
-    const baseName = path.replace(/\.[^/.]+$/, '')
-    // Find a file with the same base name and a subtitle extension
-    const captionFile = fileList.find(file => file.path.startsWith(baseName) && /\.(srt|vtt)$/i.test(file.path))
-    return captionFile ? getFileLink(captionFile.path, captionFile.id) : ''
-  }
+
+  // Sidecar subtitles for a video, converted to WebVTT in the browser because Chrome
+  // and Firefox refuse anything else in a <track> element.
+  const getVideoCaptions = path =>
+    findSidecarSubtitles(path, fileList).map(track => ({
+      src: getFileLink(track.path, track.id),
+      lang: track.lang,
+      label: track.label,
+    }))
+
   const createPlayer = (file, index) => {
     const hls = shouldUseGStreamerPlayer(file.path, gstRuntime)
     const downloadSrc = getFileLink(file.path, file.id)
@@ -257,6 +263,22 @@ const Torrent = ({ torrent }) => {
   const singlePlayer = players.length === 1 ? players[0] : null
   const audioMenuTracks = audioMenuPlayer ? audioTracksByFile[audioMenuPlayer.id] || [] : []
 
+  // "Up next" walks the playable files in order, so finishing one episode offers the next
+  // one instead of dropping the viewer back to the card.
+  const nextPlayer = useMemo(() => {
+    if (!selectedPlayer) return null
+    const index = availablePlayers.findIndex(player => player.key === selectedPlayer.key)
+    if (index < 0) return null
+    return availablePlayers[index + 1] || null
+  }, [availablePlayers, selectedPlayer])
+
+  const previousPlayer = useMemo(() => {
+    if (!selectedPlayer) return null
+    const index = availablePlayers.findIndex(player => player.key === selectedPlayer.key)
+    if (index < 0) return null
+    return index > 0 ? availablePlayers[index - 1] : null
+  }, [availablePlayers, selectedPlayer])
+
   const openSingleFileInVlc = () => {
     if (!singlePlayer) return
     const streamUrl = new URL(singlePlayer.downloadSrc, window.location.href)
@@ -269,6 +291,45 @@ const Torrent = ({ torrent }) => {
     videoSrc: gstreamerMasterUrl(hash, player.id, audio),
     playerTitle: title || player.label,
   })
+
+  const markPlayerUnsupported = key => {
+    setUnsupportedPlayers(current => ({ ...current, [key]: true }))
+    setSelectedPlayer(current => (current?.key === key ? null : current))
+  }
+
+  // A direct stream that the browser refuses is retried once through the server side
+  // transcoder before the file is written off as unplayable. This builds the fallback player
+  // from the direct one only, so it is safe to call from a state updater that runs against a
+  // stale render closure.
+  const toGStreamerPlayer = player => {
+    if (!player || player.hls) return player
+    if (!canFallbackToGStreamer(player.path, gstRuntime)) return player
+    return {
+      ...player,
+      key: `${player.id}:gst`,
+      hls: true,
+      videoSrc: gstreamerMasterUrl(hash, player.id),
+      heartbeatSrc: gstreamerHeartbeatUrl(hash),
+    }
+  }
+
+  const withTranscodeFallback = player => {
+    if (!player || player.hls) return player
+    if (!transcodeFallback[player.id]) return player
+    return toGStreamerPlayer(player)
+  }
+
+  const handlePlayerFailure = player => {
+    if (!player) return
+    if (!player.hls && canFallbackToGStreamer(player.path, gstRuntime) && !transcodeFallback[player.id]) {
+      setTranscodeFallback(current => ({ ...current, [player.id]: true }))
+      setSelectedPlayer(current => (current?.key === player.key ? toGStreamerPlayer(current) : current))
+      return
+    }
+    markPlayerUnsupported(withTranscodeFallback(player).key)
+  }
+
+  const resolvedSinglePlayer = withTranscodeFallback(singlePlayer)
 
   const showAudioTracks = (player, tracks, anchor) => {
     if (!tracks.length) {
@@ -340,10 +401,6 @@ const Torrent = ({ torrent }) => {
     setOpenEpisodeMenuAfterResolve(false)
   }, [openEpisodeMenuAfterResolve, players.length])
 
-  const markPlayerUnsupported = key => {
-    setUnsupportedPlayers(current => ({ ...current, [key]: true }))
-    setSelectedPlayer(current => (current?.key === key ? null : current))
-  }
   const resolvePlayers = async () => {
     setIsResolvingPlayers(true)
     setPlayerResolveFailed(false)
@@ -392,15 +449,15 @@ const Torrent = ({ torrent }) => {
             </StyledButton>
           )}
 
-          {singlePlayer && !unsupportedPlayers[singlePlayer.key] ? (
-            singlePlayer.hls ? (
+          {singlePlayer && !unsupportedPlayers[resolvedSinglePlayer.key] ? (
+            resolvedSinglePlayer.hls ? (
               <>
                 <StyledButton
                   ref={audioButtonRef}
                   disabled={isResolvingAudio || isResolvingPlayers}
                   aria-haspopup='menu'
                   aria-expanded={Boolean(audioMenuAnchor)}
-                  onClick={event => resolveAudioTracks(singlePlayer, event.currentTarget)}
+                  onClick={event => resolveAudioTracks(resolvedSinglePlayer, event.currentTarget)}
                 >
                   {isResolvingAudio || isResolvingPlayers ? (
                     <CircularProgress size={20} color='inherit' />
@@ -435,11 +492,15 @@ const Torrent = ({ torrent }) => {
             ) : (
               <VideoPlayer
                 title={title}
-                videoSrc={singlePlayer.videoSrc}
-                downloadSrc={singlePlayer.downloadSrc}
-                captionSrc={getVideoCaption(singlePlayer.path)}
-                heartbeatSrc={singlePlayer.heartbeatSrc}
-                onNotSupported={() => markPlayerUnsupported(singlePlayer.key)}
+                videoSrc={resolvedSinglePlayer.videoSrc}
+                downloadSrc={resolvedSinglePlayer.downloadSrc}
+                captions={resolvedSinglePlayer.hls ? [] : getVideoCaptions(resolvedSinglePlayer.path)}
+                hash={hash}
+                fileId={resolvedSinglePlayer.id}
+                hls={resolvedSinglePlayer.hls}
+                heartbeatSrc={resolvedSinglePlayer.heartbeatSrc}
+                onNotSupported={() => handlePlayerFailure(resolvedSinglePlayer)}
+                onPlaybackError={() => handlePlayerFailure(resolvedSinglePlayer)}
               />
             )
           ) : players.length > 1 && availablePlayers.length ? (
@@ -500,13 +561,20 @@ const Torrent = ({ torrent }) => {
               title={selectedPlayer.playerTitle || selectedPlayer.label}
               videoSrc={selectedPlayer.videoSrc}
               downloadSrc={selectedPlayer.downloadSrc}
-              captionSrc={selectedPlayer.hls ? '' : getVideoCaption(selectedPlayer.path)}
+              captions={selectedPlayer.hls ? [] : getVideoCaptions(selectedPlayer.path)}
+              hash={hash}
+              fileId={selectedPlayer.id}
               hls={selectedPlayer.hls}
               heartbeatSrc={selectedPlayer.heartbeatSrc}
               initiallyOpen
               showTrigger={false}
+              nextTitle={nextPlayer?.playerTitle || nextPlayer?.label || ''}
+              onPlayNext={nextPlayer ? () => setSelectedPlayer(nextPlayer) : undefined}
+              previousTitle={previousPlayer?.playerTitle || previousPlayer?.label || ''}
+              onPlayPrevious={previousPlayer ? () => setSelectedPlayer(previousPlayer) : undefined}
               onClose={() => setSelectedPlayer(null)}
-              onNotSupported={() => markPlayerUnsupported(selectedPlayer.key)}
+              onNotSupported={() => handlePlayerFailure(selectedPlayer)}
+              onPlaybackError={() => handlePlayerFailure(selectedPlayer)}
             />
           )}
 
